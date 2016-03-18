@@ -76,6 +76,8 @@ my %builtinweb = (
     'ipifyipv6' => { 'url' => 'https://api6.ipify.org/', },
     'loopia'    => { 'url' => 'http://dns.loopia.se/checkip/checkip.php', 'skip' => 'Current IP Address:', },
     'myonlineportal' => { 'url' => 'https://myonlineportal.net/checkip', },
+    'whatismyv6' => { 'url' => 'http://whatismyv6.com/', 'skip' => 'Address of:', },
+    'nsupdate.info' => { 'url' => 'https://ipv6.nsupdate.info/myip', },
 );
 my %builtinfw = (
     'watchguard-soho' => {
