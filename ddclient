@@ -4099,7 +4099,8 @@ sub nic_freedns_update {
 
     ## First get the list of updatable hosts
     my $url;
-    $url = "http://$config{$_[0]}{'server'}/api/?action=getdyndns&sha=" . &sha1_hex("$config{$_[0]}{'login'}|$config{$_[0]}{'password'}");
+    # note, use '&v=2' in $url in order to pull IPv6 AAAA records as well as IPv4 A records
+    $url = "http://$config{$_[0]}{'server'}/api/?action=getdyndns&v=2&sha=" . &sha1_hex("$config{$_[0]}{'login'}|$config{$_[0]}{'password'}");
     my $reply = geturl({ proxy => opt('proxy'), url => $url });
     if (!defined($reply) || !$reply || !header_ok($_[0], $reply)) {
         failed("updating %s: Could not connect to %s for site list.", $_[0], $url);
@@ -4107,9 +4108,22 @@ sub nic_freedns_update {
     }
     my @lines = split("\n", $reply);
     my %freedns_hosts;
+    my %freedns_hosts_ipv6;
+
+    # We have retrieved list of URLs associated with users FreeDNS account.
+    # Store them into freedns_hosts separating IPv4 (A records) from IPv6 (AAAA records)
     grep {
         my @rec = split(/\|/, $_);
-        $freedns_hosts{$rec[0]} = \@rec if ($#rec > 0);
+        if ($#rec > 0) {
+            # This little gem from http://home.deds.nl/~aeron/regex/
+            if ($rec[1] =~ /^(((?=.*(::))(?!.*\3.+\3))\3?|([\dA-F]{1,4}(\3|:\b|$)|\2))(?4){5}((?4){2}|(((2[0-4]|1\d|[1-9])?\d|25[0-5])\.?\b){4})\z/ai) {
+                debug("Host: %s, IPv6: %s", $rec[0], $rec[1]);
+                $freedns_hosts_ipv6{$rec[0]} = \@rec;
+            } else {
+                debug("Host: %s, IPv4: %s", $rec[0], $rec[1]);
+                $freedns_hosts{$rec[0]} = \@rec;
+            }
+        }
     } @lines;
     if (!keys %freedns_hosts) {
         failed("Could not get freedns update URLs from %s", $config{$_[0]}{'server'});
@@ -4119,35 +4133,87 @@ sub nic_freedns_update {
     foreach my $h (@_) {
         if (!$h) { next }
         my $ip = delete $config{$h}{'wantip'};
-        info("setting IP address to %s for %s", $ip, $h);
-        verbose("UPDATE:", "updating %s", $h);
+        my $ipv6 = delete $config{$h}{'wantipv6'};
 
-        if ($ip eq $freedns_hosts{$h}->[1]) {
-            $config{$h}{'ip'}     = $ip;
-            $config{$h}{'mtime'}  = $now;
-            $config{$h}{'status'} = 'good';
-            success("update not necessary %s: good: IP address already set to %s", $h, $ip);
-        } else {
-            my $reply = geturl({proxy => opt('proxy'), url => $freedns_hosts{$h}->[2] });
-            if (!defined($reply) || !$reply) {
-                failed("updating %s: Could not connect to %s.", $h, $freedns_hosts{$h}->[2]);
-                last;
-            }
-            if (!header_ok($h, $reply)) {
-                $config{$h}{'status'} = 'failed';
-                last;
-            }
+        info("%s: setting IP address(s) to %s / %s", $h, define($ip, "<undefined>"), define($ipv6, "<undefined>"));
 
-            if ($reply =~ /Updated.*$h.*to.*$ip/) {
+        if (defined($freedns_hosts{$h}) && defined($ip)) {
+            if ($ip eq $freedns_hosts{$h}->[1]) {
                 $config{$h}{'ip'}     = $ip;
                 $config{$h}{'mtime'}  = $now;
                 $config{$h}{'status'} = 'good';
-                success("updating %s: good: IP address set to %s", $h, $ip);
+                success("update not necessary %s: good: IPv4 address already set to %s", $h, $ip);
             } else {
-                $config{$h}{'status'} = 'failed';
-                warning("SENT: %s", $freedns_hosts{$h}->[2]) unless opt('verbose');
-                warning("REPLIED: %s", $reply);
-                failed("updating %s: Invalid reply.", $h);
+                debug("Update: %s", $freedns_hosts{$h}->[2] . "&address=" . $ip);
+                my $reply = geturl({
+                    proxy => opt('proxy'),
+                    url => $freedns_hosts{$h}->[2] . "&address=" . $ip,
+                });
+                if (!defined($reply) || !$reply) {
+                    failed("updating %s: Could not connect to %s.", $h, $freedns_hosts{$h}->[2]);
+                    last;
+                }
+                if (!header_ok($h, $reply)) {
+                    $config{$h}{'status'} = 'failed';
+                    last;
+                }
+
+                if ($reply =~ /Updated.*$h.*to.*$ip/) {
+                    $config{$h}{'ip'} = $ip;
+                    $config{$h}{'mtime'}  = $now;
+                    $config{$h}{'status'} = 'good';
+                    success("updating %s: good: IP address set to %s", $h, $ip);
+                } else {
+                    $config{$h}{'status'} = 'failed';
+                    warning("SENT: %s", $freedns_hosts{$h}->[2]) unless opt('verbose');
+                    warning("REPLIED: %s", $reply);
+                    failed("updating %s: Invalid reply.", $h);
+                }
+            }
+        } else {
+            if (!$daemon || opt('verbose')) {
+                warning("%s: Cannot set IPv4 to %s No A record at FreeDNS", $h, $ip) if (!defined($freedns_hosts{$h}) && defined($ip));
+                warning("%s: Cannot set IPv4, A record exists but no address provided", $h) if (defined($freedns_hosts{$h}) && !defined($ip));
+            }
+        }
+
+        if (defined($freedns_hosts_ipv6{$h}) && defined($ipv6)) {
+            if ($ipv6 eq $freedns_hosts_ipv6{$h}->[1]) {
+                $config{$h}{'ipv6'} = $ipv6;
+                $config{$h}{'mtime'} = $now;
+                $config{$h}{'status'} = 'good';
+                success("update not necessary %s: good: IPv6 address already set to %s", $h, $ipv6);
+            } else {
+                debug("Update: %s", $freedns_hosts_ipv6{$h}->[2] . "&address=" . $ipv6);
+                my $reply = geturl({
+                    proxy => opt('proxy'),
+                    url => $freedns_hosts_ipv6{$h}->[2] . "&address=" . $ipv6,
+                });
+                if (!defined($reply) || !$reply) {
+                    failed("updating %s: Could not connect to %s.", $h, $freedns_hosts_ipv6{$h}->[2]);
+                    last;
+                }
+                if (!header_ok($h, $reply)) {
+                    $config{$h}{'status'} = 'failed';
+                    last;
+                }
+
+                if ($reply =~ /Updated.*$h.*to.*$ipv6/) {
+                    $config{$h}{'ipv6'}   = $ipv6;
+                    $config{$h}{'mtime'}  = $now;
+                    $config{$h}{'status'} = 'good';
+                    success("updating %s: good: IPv6 address set to %s", $h, $ipv6);
+                } else {
+                    $config{$h}{'status'} = 'failed';
+                    warning("SENT: %s", $freedns_hosts_ipv6{$h}->[2]) unless opt('verbose');
+                    warning("REPLIED: %s", $reply);
+                    failed("updating %s: Invalid reply.", $h);
+                }
+            }
+        } else {
+            if (!$daemon || opt('verbose')) {
+                warning("%s: Cannot set IPv6 to %s No AAAA record at FreeDNS", $h, $ipv6) if (!defined($freedns_hosts_ipv6{$h}) && defined($ipv6));
+                warning("%s: Cannot set IPv6, AAAA record exists but no address provided", $h) if (defined($freedns_hosts_ipv6{$h}) && !defined($ipv6));
             }
         }
     }
