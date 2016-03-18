@@ -367,6 +367,7 @@ my %variables = (
         'retry'               => setv(T_BOOL,  0, 0, 0, 0,                    undef),
         'force'               => setv(T_BOOL,  0, 0, 0, 0,                    undef),
         'ssl'                 => setv(T_BOOL,  0, 0, 0, 0,                    undef),
+        'curl'                => setv(T_BOOL,  0, 0, 0, 0,                    undef),
         'syslog'              => setv(T_BOOL,  0, 0, 1, 0,                    undef),
         'facility'            => setv(T_STRING,0, 0, 1, 'daemon',             undef),
         'priority'            => setv(T_STRING,0, 0, 1, 'notice',             undef),
@@ -807,6 +808,7 @@ my @opt = (
     [ "options",     "=s",  "-options opt,opt     : optional per-service arguments (see below)" ],
     "",
     [ "ssl",         "!",  "-{no}ssl              : do updates over encrypted SSL connection" ],
+    [ "curl",        "!",  "-{no}curl             : use cURL for network connections (default nocurl)" ],
     [ "retry",       "!",  "-{no}retry            : retry failed updates." ],
     [ "force",       "!",  "-{no}force            : force an update even if the update may be unnecessary" ],
     [ "timeout",     "=i", "-timeout max          : wait at most 'max' seconds for the host to respond" ],
@@ -2134,111 +2136,142 @@ sub geturl {
     debug("url      = %s", $url);
     debug("ip ver   = %s", $ipversion);
 
-    ## determine peer and port to use.
-    $peer = $proxy || $server;
-    $peer =~ s%/.*%%;
-    $port = $peer;
-    $port =~ s%^.*:%%;
-    $port = $default_port unless $port =~ /^\d+$/;
-    $peer =~ s%:.*$%%;
+    if (!opt('curl')) {
+        # Access network using perl functions.
+        ## determine peer and port to use.
+        $peer = $proxy || $server;
+        $peer =~ s%/.*%%;
+        $port = $peer;
+        $port =~ s%^.*:%%;
+        $port = $default_port unless $port =~ /^\d+$/;
+        $peer =~ s%:.*$%%;
 
-    $request = "$method ";
-    if (!$use_ssl) {
-        $request .= "http://$server" if $proxy;
-    } else {
-        $request .= "https://$server" if $proxy;
-    }
-    $request .= "/$url HTTP/1.0\n";
-    $request .= "Host: $server\n";
-
-    my $auth = encode_base64("${login}:${password}", "");
-    $request .= "Authorization: Basic $auth\n" if $login || $password;
-    $request .= "User-Agent: ${program}/${version}\n";
-    if ($data) {
-        $request .= "Content-Type: application/x-www-form-urlencoded\n" if $headers !~ /^Content-Type:/mi;
-        $request .= "Content-Length: " . length($data) . "\n";
-    }
-    $request .= "Connection: close\n";
-    $headers .= "\n" if $headers ne '' && substr($headers, -1) ne "\n";
-    $request .= $headers;
-    $request .= "\n";
-    # RFC 7230 says that all lines before the body must end with <cr><lf>.
-    (my $rq = $request) =~ s/(?<!\r)\n/\r\n/g;
-    $request .= $data;
-    $rq .= $data;
-
-    my $socket_class = 'IO::Socket::INET';
-    if ($use_ssl) {
-        # IO::Socket::SSL will load IPv6 support if available on the system.
-        load_ssl_support;
-        $socket_class = 'IO::Socket::SSL';
-    } elsif ($globals{'ipv6'} || $ipversion eq '6') {
-        load_ipv6_support;
-        $socket_class = 'IO::Socket::INET6';
-    }
-    my %socket_args = (
-        PeerAddr => $peer,
-        PeerPort => $port,
-        Proto => 'tcp',
-        MultiHomed => 1,
-        Timeout => opt('timeout'),
-    );
-    if ($ipversion eq '4') {
-        $socket_args{Domain} = PF_INET;
-        $socket_args{Family} = AF_INET;
-    } elsif ($ipversion eq '6') {
-        $socket_args{Domain} = PF_INET6;
-        $socket_args{Family} = AF_INET6;
-    } elsif ($ipversion ne '') {
-        fatal("geturl passed unsupported 'ipversion' value %s", $ipversion);
-    }
-
-    my $ipv = $ipversion eq '' ? '' : sprintf(" (IPv%s)", $ipversion);
-    my $peer_port_ipv = sprintf("%s:%s%s", $peer, $port, $ipv);
-    my $to = sprintf("%s%s%s", $server, $proxy ? " via proxy $peer:$port" : "", $ipv);
-    verbose("CONNECT:", "%s", $to);
-    $0 = sprintf("%s - connecting to %s", $program, $peer_port_ipv);
-    if (opt('exec')) {
-        $sd = $socket_class->new(%socket_args);
-        defined($sd) or warning("cannot connect to %s socket: %s%s", $peer_port_ipv, $@,
-                                $use_ssl ? ' ' . IO::Socket::SSL::errstr() : '');
-    } else {
-        debug("skipped network connection");
-        verbose("SENDING:", "%s", $request);
-    }
-    if (defined $sd) {
-        ## send the request to the http server
-        verbose("CONNECTED: ", $use_ssl ? 'using SSL' : 'using HTTP');
-        verbose("SENDING:", "%s", $request);
-
-        $0 = sprintf("%s - sending to %s", $program, $peer_port_ipv);
-        my $result = syswrite $sd, $rq;
-        if ($result != length($rq)) {
-            warning("cannot send to %s (%s).", $peer_port_ipv, $!);
+        $request = "$method ";
+        if (!$use_ssl) {
+            $request .= "http://$server" if $proxy;
         } else {
-            $0 = sprintf("%s - reading from %s", $program, $peer_port_ipv);
-            eval {
-                local $SIG{'ALRM'} = sub { die "timeout"; };
-                alarm(opt('timeout')) if opt('timeout') > 0;
-                while ($_ = <$sd>) {
-                    $0 = sprintf("%s - read from %s", $program, $peer_port_ipv);
-                    verbose("RECEIVE:", "%s", define($_, "<undefined>"));
-                    $reply .= $_ if defined $_;
-                }
-                if (opt('timeout') > 0) {
-                    alarm(0);
-                }
-            };
-            close($sd);
+            $request .= "https://$server" if $proxy;
+        }
+        $request .= "/$url HTTP/1.0\n";
+        $request .= "Host: $server\n";
 
-            if ($@ and $@ =~ /timeout/) {
-                warning("TIMEOUT: %s after %s seconds", $to, opt('timeout'));
-                $reply = '';
+        my $auth = encode_base64("${login}:${password}", "");
+        $request .= "Authorization: Basic $auth\n" if $login || $password;
+        $request .= "User-Agent: ${program}/${version}\n";
+        if ($data) {
+            $request .= "Content-Type: application/x-www-form-urlencoded\n" if $headers !~ /^Content-Type:/mi;
+            $request .= "Content-Length: " . length($data) . "\n";
+        }
+        $request .= "Connection: close\n";
+        $headers .= "\n" if $headers ne '' && substr($headers, -1) ne "\n";
+        $request .= $headers;
+        $request .= "\n";
+        # RFC 7230 says that all lines before the body must end with <cr><lf>.
+        (my $rq = $request) =~ s/(?<!\r)\n/\r\n/g;
+        $request .= $data;
+        $rq .= $data;
+
+        my $socket_class = 'IO::Socket::INET';
+        if ($use_ssl) {
+            # IO::Socket::SSL will load IPv6 support if available on the system.
+            load_ssl_support;
+            $socket_class = 'IO::Socket::SSL';
+        } elsif ($globals{'ipv6'} || $ipversion eq '6') {
+            load_ipv6_support;
+            $socket_class = 'IO::Socket::INET6';
+        }
+        my %socket_args = (
+            PeerAddr => $peer,
+            PeerPort => $port,
+            Proto => 'tcp',
+            MultiHomed => 1,
+            Timeout => opt('timeout'),
+        );
+        if ($ipversion eq '4') {
+            $socket_args{Domain} = PF_INET;
+            $socket_args{Family} = AF_INET;
+        } elsif ($ipversion eq '6') {
+            $socket_args{Domain} = PF_INET6;
+            $socket_args{Family} = AF_INET6;
+        } elsif ($ipversion ne '') {
+            fatal("geturl passed unsupported 'ipversion' value %s", $ipversion);
+        }
+
+        my $ipv = $ipversion eq '' ? '' : sprintf(" (IPv%s)", $ipversion);
+        my $peer_port_ipv = sprintf("%s:%s%s", $peer, $port, $ipv);
+        my $to = sprintf("%s%s%s", $server, $proxy ? " via proxy $peer:$port" : "", $ipv);
+        verbose("CONNECT:", "%s", $to);
+        $0 = sprintf("%s - connecting to %s", $program, $peer_port_ipv);
+        if (opt('exec')) {
+            $sd = $socket_class->new(%socket_args);
+            defined($sd) or warning("cannot connect to %s socket: %s%s", $peer_port_ipv, $@,
+                                    $use_ssl ? ' ' . IO::Socket::SSL::errstr() : '');
+        } else {
+            debug("skipped network connection");
+            verbose("SENDING:", "%s", $request);
+        }
+        if (defined $sd) {
+            ## send the request to the http server
+            verbose("CONNECTED: ", $use_ssl ? 'using SSL' : 'using HTTP');
+            verbose("SENDING:", "%s", $request);
+
+            $0 = sprintf("%s - sending to %s", $program, $peer_port_ipv);
+            my $result = syswrite $sd, $rq;
+            if ($result != length($rq)) {
+                warning("cannot send to %s (%s).", $peer_port_ipv, $!);
+            } else {
+                $0 = sprintf("%s - reading from %s", $program, $peer_port_ipv);
+                eval {
+                    local $SIG{'ALRM'} = sub { die "timeout"; };
+                    alarm(opt('timeout')) if opt('timeout') > 0;
+                    while ($_ = <$sd>) {
+                        $0 = sprintf("%s - read from %s", $program, $peer_port_ipv);
+                        verbose("RECEIVE:", "%s", define($_, "<undefined>"));
+                        $reply .= $_ if defined $_;
+                    }
+                    if (opt('timeout') > 0) {
+                        alarm(0);
+                    }
+                };
+                close($sd);
+
+                if ($@ and $@ =~ /timeout/) {
+                    warning("TIMEOUT: %s after %s seconds", $to, opt('timeout'));
+                    $reply = '';
+                }
+                $reply = '' if !defined $reply;
             }
-            $reply = '' if !defined $reply;
+        }
+        $0 = sprintf("%s - closed %s", $program, $peer_port_ipv);
+    } else {
+        # Access network using cURL.
+        my $curlopt = '';
+        my $protocol = 'http';
+        $curlopt = '--ipv4' if $ipversion eq '4';
+        $curlopt = '--ipv6' if $ipversion eq '6';
+        if ($use_ssl) {
+            $protocol = 'https';
+            $curlopt .= ' --insecure';
+        }
+
+        if (!opt('exec')) {
+            debug("skipped network connection");
+            verbose("SENDING:", "%s", '${protocol}://${server}/$url');
+        } else {
+            $0 = sprintf("%s - curl sending to %s", $program, '${protocol}://${server}/$url');
+            my $timeout = opt('timeout');
+
+            $reply = <<`USE_CURL`;
+              /usr/bin/curl -si0 --user '$login:$password' --user-agent '${program}/${version}' \\
+                --connect-timeout $timeout --max-time $timeout $curlopt \\
+                --url '${protocol}://${server}/$url' 2>/dev/null
+USE_CURL
+
+            if (!$reply) {
+                warning("curl cannot connect to ${protocol}://${server}/$url");
+            }
         }
     }
-    $0 = sprintf("%s - closed %s", $program, $peer_port_ipv);
 
     ## during testing simulate reading the URL
     if (opt('test')) {
