@@ -2136,7 +2136,7 @@ sub geturl {
     debug("url      = %s", $url);
     debug("ip ver   = %s", $ipversion);
 
-    if (!opt('curl')) {
+    if (!opt('curl') && $ipversion ne '6') {
         # Access network using perl functions.
         ## determine peer and port to use.
         $peer = $proxy || $server;
